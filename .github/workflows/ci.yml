@@ -1,4 +1,4 @@
-name: OpenWRT CI Build
+name: OpenWRT C8809 Build
 
 on:
   workflow_dispatch:
@@ -58,15 +58,20 @@ jobs:
           ./scripts/feeds update -a -qq >/dev/null 2>&1
           ./scripts/feeds install -a -qq >/dev/null 2>&1
 
-      - name: 配置编译选项
+      - name: 配置编译选项（仅C8809）
         run: |
           cat <<EOF | sed -E 's/^  //' >.config
+            # 基础平台配置（IPQ50xx）
             CONFIG_TARGET_ipq50xx=y
             CONFIG_TARGET_ipq50xx_arm=y
-            CONFIG_TARGET_MULTI_PROFILE=y
-            CONFIG_TARGET_ALL_PROFILES=y
-            CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+            CONFIG_TARGET_ipq50xx_arm_DEVICE_qcom_ipq5018-c8809=y  # 仅启用C8809设备
+            CONFIG_TARGET_PER_DEVICE_ROOTFS=y  # 为每个设备生成独立根文件系统
 
+            # 禁用多设备和全设备编译
+            # CONFIG_TARGET_MULTI_PROFILE is not set  # 关闭多设备支持
+            # CONFIG_TARGET_ALL_PROFILES is not set   # 关闭全设备编译
+
+            # 其他必要配置
             CONFIG_IB=y
             # CONFIG_IB_STANDALONE is not set
             CONFIG_SDK=y
@@ -74,6 +79,7 @@ jobs:
             CONFIG_ALL_NONSHARED=y
             CONFIG_REPRODUCIBLE_DEBUG_INFO=y
 
+            # 软件包配置（保留中文支持）
             CONFIG_PACKAGE_luci=y
             CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
             CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
@@ -97,23 +103,24 @@ jobs:
           make -j4 tools/install -s
           make -j4 toolchain/install -s
 
-      - name: 构建固件
+      - name: 构建C8809固件
         run: |
           if ! make -j4 -s; then
             echo "构建失败，重新构建并显示详细信息..."
             make -j1 V=s
           fi
 
-      - name: 整理构建产物
+      - name: 整理C8809构建产物
         run: |
           mkdir -p output
-          cp -r bin/targets/ipq50xx/arm/* output/
+          # 仅复制C8809相关文件（假设固件名包含c8809关键字）
+          cp bin/targets/ipq50xx/arm/*c8809* output/
           cp version output/
 
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4  # 已更新为最新的v4版本
+      - name: 上传C8809固件
+        uses: actions/upload-artifact@v4
         with:
-          name: openwrt-ipq50xx-arm-${{ github.sha }}
+          name: openwrt-c8809-${{ github.sha }}
           path: output/
           retention-days: 7
 
@@ -126,5 +133,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: 1,
-              body: `构建失败: [查看详情](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+              body: `C8809构建失败: [查看详情](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`
             })
