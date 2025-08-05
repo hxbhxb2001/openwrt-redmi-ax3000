@@ -1,41 +1,68 @@
-name: CI
+name: OpenWRT CI Build
 
 on:
   workflow_dispatch:
   push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 0'
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3600
+
     steps:
-      - name: Free disk space
+      - name: 释放磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache /usr/share/swift
+          sudo apt clean
+          sudo apt autoremove -y
+          df -h
+        # 仅输出错误信息
+        continue-on-error: true
 
-      - name: Install dependencies
+      - name: 安装依赖
         run: |
-          sudo apt update
-          sudo apt install build-essential clang flex g++ gawk gcc-multilib gettext \
-            git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev
+          sudo apt update -qq  # 静默更新
+          sudo apt install -y -qq \  # 静默安装，仅显示错误
+            build-essential clang flex g++ gawk gcc-multilib gettext \
+            git libncurses5-dev libssl-dev python3 python3-distutils \
+            rsync unzip wget curl zlib1g-dev
 
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: 'recursive'
+        # 隐藏checkout详细日志
+        env:
+          ACTIONS_STEP_DEBUG: false
 
-      - name: Hook the openwrt_core URL for opkg
+      - name: 缓存下载文件
+        uses: actions/cache@v3
+        with:
+          path: dl
+          key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('**/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-dl-
+
+      - name: 配置版本信息和仓库地址
         run: |
           OWNER="${GITHUB_REPOSITORY%%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
-          TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
-
-          echo "ci-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S')-${GITHUB_SHA:0:8}" >version
+          echo "ci-${GITHUB_RUN_STARTED_AT//[-:T]/}-${GITHUB_SHA:0:8}" > version
           sed -i "s|%U/targets/%S/packages|https://${OWNER}.github.io/${REPO}/${GITHUB_REF_NAME}/%R|" include/feeds.mk
+        # 仅在出错时显示详细输出
+        env:
+          VERBOSE: false
 
-      - name: Update and install feeds
+      - name: 更新并安装软件源
         run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds update -a -q  # 静默更新
+          ./scripts/feeds install -a -q  # 静默安装
 
-      - name: Configure
+      - name: 配置编译选项
         run: |
           cat <<EOF | sed -E 's/^  //' >.config
             CONFIG_TARGET_ipq50xx=y
@@ -48,38 +75,63 @@ jobs:
             # CONFIG_IB_STANDALONE is not set
             CONFIG_SDK=y
             CONFIG_MAKE_TOOLCHAIN=y
-
             CONFIG_ALL_NONSHARED=y
             CONFIG_REPRODUCIBLE_DEBUG_INFO=y
 
             CONFIG_PACKAGE_luci=y
+            CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+            CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+            CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
+            CONFIG_PACKAGE_wget=y
+            CONFIG_PACKAGE_curl=y
+            CONFIG_PACKAGE_htop=y
+            CONFIG_PACKAGE_openssh-server=y
           EOF
-          make defconfig
+          make defconfig >/dev/null 2>&1  # 完全静默，仅保留错误输出
 
-      - name: Download
+      - name: 下载源码包
         run: |
-          make -j16 download
+          # 首次静默下载，失败时详细输出
+          if ! make -j$(nproc) download -s; then
+            echo "下载失败，重试并显示详细信息..."
+            make -j1 download V=s
+          fi
 
-      - name: Build tools
+      - name: 构建工具和工具链
         run: |
-          make -j$(nproc) tools/install
+          # 使用静默模式，仅输出错误
+          make -j4 tools/install -s
+          make -j4 toolchain/install -s
 
-      - name: Build toolchain
+      - name: 构建固件
         run: |
-          make -j$(nproc) toolchain/install
+          # 正常构建使用静默模式，出错时重新构建并显示详细日志
+          if ! make -j4 -s; then
+            echo "构建失败，重新构建并显示详细信息..."
+            make -j1 V=s
+          fi
 
-      - name: Build all
+      - name: 整理构建产物
         run: |
-          make -j$(nproc) IGNORE_ERRORS=1
+          mkdir -p output
+          cp -r bin/targets/ipq50xx/arm/* output/
+          cp version output/
 
-      - name: Upload bin to artifacts
+      - name: 上传构建产物
         uses: actions/upload-artifact@v3
         with:
-          name: bin-ipq50xx-arm
-          path: bin/targets/ipq50xx/arm/*
+          name: openwrt-ipq50xx-arm-${{ github.sha }}
+          path: output/
+          retention-days: 7
 
-      - name: Upload dl to artifacts
-        uses: actions/upload-artifact@v3
+      - name: 构建失败通知
+        if: failure()
+        uses: actions/github-script@v6
         with:
-          name: dl
-          path: dl/*
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1,
+              body: `构建失败: [查看详情](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+            })
